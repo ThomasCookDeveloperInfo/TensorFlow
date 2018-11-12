@@ -4,6 +4,8 @@ from rx import Observable
 import multiprocessing
 from rx.concurrency import ThreadPoolScheduler
 from rx.concurrency import TkinterScheduler
+import tensorflow as tf
+from tensorflow import keras
 
 SIM_WIDTH = 1000.0
 SIM_HEIGHT = 1000.0
@@ -15,9 +17,17 @@ BULLET_SPEED = 25.0
 MAX_BULLETS = 10
 TORQUE = 3.0
 THRUST = 3.0
-GRID_COLUMNS = 10
-GRID_ROWS = 10
+GRID_COLUMNS = 5
+GRID_ROWS = GRID_COLUMNS
 BULLET_RADIUS = 5.0
+PHYSICS_PER_SECOND = 60
+FRAMES_PER_SECOND = 60
+ASTEROIDS = 2
+
+root = Tk()
+optimal_thread_count = multiprocessing.cpu_count()
+pool_scheduler = ThreadPoolScheduler(optimal_thread_count)
+tkinter_scheduler = TkinterScheduler(root)
 
 
 class GuiController(object):
@@ -36,16 +46,23 @@ class Ship(object):
         self.rot = 0.0
         self.angularTorque = 0.0
         self.thrust = 0.0
+        self.can_shoot = True
         self.shooting = False
         self.bullets = []
+        self.reloadDisposable = Observable.interval(1000 / 3) \
+            .observe_on(pool_scheduler) \
+            .subscribe(on_next=lambda i: self.reload())
 
-    def get_shape(self):
-        return map(lambda point: (
+    def reload(self):
+        self.can_shoot = True
+
+    def get_shape(self, scale_x, scale_y):
+        return list(map(lambda point: (
             (
-                point[0] * cos(radians(self.rot)) - point[1] * sin(radians(self.rot)),
-                point[0] * sin(radians(self.rot)) + point[1] * cos(radians(self.rot))
+                ((point[0] * cos(radians(self.rot)) - point[1] * sin(radians(self.rot))) + self.x) * scale_x,
+                ((point[0] * sin(radians(self.rot)) + point[1] * cos(radians(self.rot))) + self.y) * scale_y
             )
-        ), self.shape)
+        ), self.shape))
 
     def update(self):
         self.vrot += self.angularTorque
@@ -84,11 +101,24 @@ class Ship(object):
         elif self.y < 0:
             self.y = SIM_HEIGHT
 
-        if self.shooting:
+        if self.shooting and self.can_shoot:
             if len(self.bullets) >= MAX_BULLETS:
                 self.bullets.remove(self.bullets[0])
 
-            self.bullets.append(Bullet(self.x, self.y, self.vx, self.vy, self.rot))
+            bullet = Bullet(self.x, self.y, self.vx, self.vy, self.rot)
+
+            bullet_disposable = Observable.just(None)\
+                    .delay(1000) \
+                    .observe_on(pool_scheduler) \
+                    .subscribe(on_completed=lambda: dispose_bullet())
+
+            def dispose_bullet():
+                self.bullets.remove(bullet)
+                bullet_disposable.dispose()
+
+            self.bullets.append(bullet)
+
+            self.can_shoot = False
 
         for bullet in self.bullets:
             bullet.update()
@@ -121,22 +151,25 @@ class Asteroid(object):
         self.shape = [(-30.0, -30.0), (-30.0, 30.0), (30.0, 30.0), (30.0, -30.0)]
         self.origin = origin
 
+    def get_shape(self, scale_x, scale_y):
+        return list(map(lambda point: (
+            (
+                (point[0] + self.origin[0]) * scale_x,
+                (point[1] + self.origin[1]) * scale_y
+            )
+        ), self.shape))
+
 
 class Simulation(object):
     def __init__(self):
-        asteroid1 = Asteroid((SIM_WIDTH / 3.0, SIM_HEIGHT / 3.0))
-        asteroid2 = Asteroid(((SIM_WIDTH / 3.0) * 2.0, (SIM_HEIGHT / 3.0) * 2.0))
-        self.asteroids = [asteroid1, asteroid2]
+        self.asteroids = list(map(lambda i: Asteroid((SIM_WIDTH / 3.0, SIM_HEIGHT / 3.0)), range(0, ASTEROIDS - 1)))
         self.ship = Ship()
 
     def get_shapes(self, scale_x, scale_y):
         shapes = []
         for asteroid in self.asteroids:
-            shapes.append(list(map(
-                lambda point: ((point[0] + asteroid.origin[0]) * scale_x, (point[1] + asteroid.origin[1]) * scale_y),
-                asteroid.shape)))
-        shapes.append(list(map(lambda point: ((point[0] + self.ship.x) * scale_x, (point[1] + self.ship.y) * scale_y),
-                               self.ship.get_shape())))
+            shapes.append(asteroid.get_shape(scale_x, scale_y))
+        shapes.append(self.ship.get_shape(scale_x, scale_y))
         for bullet in self.ship.bullets:
             shapes.append([
                 ((bullet.x - BULLET_RADIUS) * scale_x, (bullet.y - BULLET_RADIUS) * scale_y),
@@ -177,15 +210,14 @@ def key_up(event):
             sim.ship.shooting = False
 
 
-root = Tk()
 root.bind('<KeyPress>', key_down)
 root.bind('<KeyRelease>', key_up)
 canvas = Canvas(root)
 canvas.pack()
 
 
-def update_sims(canvas, simulations):
-    for sim in simulations:
+def update_sims():
+    for sim in controller.simulations:
         sim.ship.update()
 
     canvas.pack(fill=BOTH, expand=1)
@@ -199,14 +231,25 @@ def update_sims(canvas, simulations):
     scale_x = column_width / SIM_WIDTH
     scale_y = row_height / SIM_HEIGHT
 
-    return list(map(lambda sim: get_shapes(scale_x, scale_y, sim), simulations))
+    return list(map(lambda sim: get_shapes(scale_x, scale_y, sim), controller.simulations))
 
 
 def get_shapes(scale_x, scale_y, sim):
     return sim.get_shapes(scale_x, scale_y)
 
 
-def draw(sims):
+class State(object):
+    def __init__(self):
+        self.simulations = []
+
+    def update_state(self, sims):
+        self.simulations = sims
+
+
+state = State()
+
+
+def draw():
     canvas.delete("all")
     canvas.pack(fill=BOTH, expand=1)
 
@@ -217,7 +260,7 @@ def draw(sims):
     row_height = canvas_height / GRID_ROWS
 
     sim_index = 0
-    for sim in sims:
+    for sim in state.simulations:
         column = sim_index % GRID_COLUMNS
         row = int(sim_index / GRID_COLUMNS)
 
@@ -243,28 +286,20 @@ def draw(sims):
         sim_index += 1
 
 
-class State(object):
-    def __init__(self):
-        self.simulations = []
-
-    def update_state(self, sims):
-        self.simulations = sims
-
-
-state = State()
-
-optimal_thread_count = multiprocessing.cpu_count()
-pool_scheduler = ThreadPoolScheduler(optimal_thread_count)
-
-Observable.interval(1000 / 60) \
-    .map(lambda i: update_sims(canvas, controller.simulations)) \
-    .subscribe_on(pool_scheduler) \
+Observable.interval(1000 / PHYSICS_PER_SECOND) \
+    .map(lambda i: update_sims()) \
     .observe_on(pool_scheduler) \
     .subscribe(on_next=lambda sims: state.update_state(sims))
 
-Observable.interval(1000 / 10) \
-    .subscribe_on(TkinterScheduler(root)) \
-    .observe_on(TkinterScheduler(root)) \
-    .subscribe(on_next=lambda interval: draw(state.simulations))
+Observable.interval(1000 / FRAMES_PER_SECOND) \
+    .subscribe_on(pool_scheduler) \
+    .observe_on(tkinter_scheduler) \
+    .subscribe(on_next=lambda interval: draw())
 
 root.mainloop()
+
+model = keras.sequential([
+    keras.layers.Dense(ASTEROIDS, input_dim=2, activation='relu'),
+    keras.layers.Dense(ASTEROIDS * 2, activation='relu'),
+    keras.layers.Dense(2, activation='sigmoid')
+])
