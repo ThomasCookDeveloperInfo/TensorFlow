@@ -1,17 +1,20 @@
 from Tkinter import *
 from math import *
 
-SIM_WIDTH = 800.0
-SIM_HEIGHT = 600.0
+SIM_WIDTH = 1000.0
+SIM_HEIGHT = 1000.0
 ROT_DRAG_COEFFICIENT = 0.75
 VEL_DRAG_COEFFICIENT = 0.9
 MAX_ROT_VEL = 60.0
-MAX_VEL = 30.0
-
+MAX_VEL = 25.0
+TORQUE = 3.0
+THRUST = 3.0
+GRID_COLUMNS = 10
+GRID_ROWS = 10
 
 class GuiController(object):
     def __init__(self):
-        self.simulations = [Simulation()]
+        self.simulations = map(lambda index: (Simulation()), range(0, GRID_COLUMNS * GRID_ROWS))
 
 
 class Ship(object):
@@ -36,7 +39,6 @@ class Ship(object):
 
     def update(self):
         self.vrot += self.angularTorque
-        self.vrot *= ROT_DRAG_COEFFICIENT
         if self.vrot > MAX_ROT_VEL:
             self.vrot = MAX_ROT_VEL
         elif self.vrot < -MAX_ROT_VEL:
@@ -45,14 +47,20 @@ class Ship(object):
         self.rot += self.vrot
 
         self.vx += self.thrust * -sin(radians(self.rot))
-        self.vx *= VEL_DRAG_COEFFICIENT
         if self.vx > MAX_VEL:
             self.vx = MAX_VEL
+        elif self.vx < -MAX_VEL:
+            self.vx = -MAX_VEL
 
         self.vy += self.thrust * cos(radians(self.rot))
-        self.vy *= VEL_DRAG_COEFFICIENT
         if self.vy > MAX_VEL:
             self.vy = MAX_VEL
+        elif self.vy < -MAX_VEL:
+            self.vy = -MAX_VEL
+
+        self.vx *= VEL_DRAG_COEFFICIENT
+        self.vy *= VEL_DRAG_COEFFICIENT
+        self.vrot *= ROT_DRAG_COEFFICIENT
 
         self.x += self.vx
         self.y += self.vy
@@ -96,13 +104,13 @@ controller = GuiController()
 def key_down(event):
     if event.keysym == "Left":
         for sim in controller.simulations:
-            sim.ship.angularTorque = -5.0
+            sim.ship.angularTorque = -TORQUE
     if event.keysym == "Right":
         for sim in controller.simulations:
-            sim.ship.angularTorque = 5.0
+            sim.ship.angularTorque = TORQUE
     if event.keysym == "Up":
         for sim in controller.simulations:
-            sim.ship.thrust = 10.0
+            sim.ship.thrust = THRUST
 
 
 def key_up(event):
@@ -131,20 +139,36 @@ def task():
     canvas_width = canvas.winfo_width()
     canvas_height = canvas.winfo_height()
 
-    scale_x = canvas_width / SIM_WIDTH
-    scale_y = canvas_height / SIM_HEIGHT
+    column_width = canvas_width / GRID_COLUMNS
+    row_height = canvas_height / GRID_ROWS
 
+    scale_x = column_width / SIM_WIDTH
+    scale_y = row_height / SIM_HEIGHT
+
+    sim_index = 0
     for sim in controller.simulations:
+
+        column = sim_index % GRID_COLUMNS
+        row = sim_index / GRID_COLUMNS
+
+        column_origin = column * column_width
+        row_origin = row * row_height
+
         sim.ship.update()
+
+        canvas.create_line(column_origin, row_origin, column_origin + column_width, row_origin)
+        canvas.create_line(column_origin + column_width, row_origin, column_origin + column_width, row_origin + row_height)
 
         for shape in sim.get_shapes(scale_x, scale_y):
             previous_point = None
             for point in shape:
                 if previous_point is not None:
-                    canvas.create_line(previous_point[0], previous_point[1], point[0], point[1])
+                    canvas.create_line(previous_point[0] + column_origin, previous_point[1] + row_origin, point[0] + column_origin, point[1] + row_origin)
                 if point == shape[-1]:
-                    canvas.create_line(point[0], point[1], shape[0][0], shape[0][1])
+                    canvas.create_line(point[0] + column_origin, point[1] + row_origin, shape[0][0] + column_origin, shape[0][1] + row_origin)
                 previous_point = point
+
+        sim_index += 1
 
     root.after(30, task)
 
